@@ -1,0 +1,823 @@
+---
+title: "Humanitarian Horizons: Visual Storytelling with IFRC Data"
+author: "Mhamad Shhab Aldeen Hasan (P166175) | MSc Data Science & Analytics, UKM | STQD6124 Data Visualization"
+date: "`r format(Sys.Date(), '%B %Y')`"
+output:
+  flexdashboard::flex_dashboard:
+    storyboard: true
+    theme: journal
+    navbar:
+      - {title: "IFRC Home", icon: "fa-home", href: "https://www.ifrc.org/", target: "_blank", align: left}
+      - {title: "About IFRC", icon: "fa-info-circle", href: "https://www.ifrc.org/who-we-are/about-ifrc", target: "_blank", align: left}
+      - {title: "IFRC Learning Platform", icon: "fa-graduation-cap", href: "https://ifrc.csod.com/client/ifrc/default.aspx", target: "_blank", align: left}
+      - {title: "ReliefWeb: IFRC", icon: "fa-newspaper-o", href: "https://reliefweb.int/organization/ifrc", target: "_blank", align: left}
+    orientation: rows
+    vertical_layout: fill
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                       fig.width = 9.5, fig.height = 5.2, dpi = 150)
+
+library(flexdashboard)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(scales)
+library(lubridate)
+library(forcats)
+library(plotly)
+
+# ---- IFRC brand palette -----------------------------------------------
+ifrc_red        <- "#ED1B2E"
+ifrc_red_dark   <- "#A81120"
+ifrc_red_light  <- "#F4A6AD"
+ifrc_gray       <- "#6D6E71"
+ifrc_gray_dark  <- "#3A3A3C"
+ifrc_gray_light <- "#D9D9DB"
+ifrc_white      <- "#FFFFFF"
+
+ifrc_palette <- c(ifrc_red, ifrc_gray, ifrc_red_dark, ifrc_gray_light, ifrc_red_light)
+ifrc_qual5   <- c(ifrc_red, ifrc_gray_dark, ifrc_red_light, ifrc_gray, ifrc_red_dark)
+
+theme_ifrc <- function(base_size = 13) {
+  theme_minimal(base_size = base_size, base_family = "sans") +
+    theme(
+      plot.title       = element_text(face = "bold", colour = ifrc_gray_dark, size = rel(1.15), margin = margin(b = 4)),
+      plot.subtitle    = element_text(colour = ifrc_gray, size = rel(0.85), margin = margin(b = 10)),
+      plot.caption     = element_text(colour = ifrc_gray, size = rel(0.65), hjust = 0, margin = margin(t = 8)),
+      axis.title       = element_text(colour = ifrc_gray_dark, size = rel(0.85)),
+      axis.text        = element_text(colour = ifrc_gray, size = rel(0.8)),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(colour = ifrc_gray_light, linewidth = 0.3),
+      legend.title     = element_text(colour = ifrc_gray_dark, size = rel(0.85), face = "bold"),
+      legend.text      = element_text(colour = ifrc_gray_dark, size = rel(0.8)),
+      legend.position  = "top",
+      legend.key.height = unit(0.4, "cm"),
+      strip.text       = element_text(colour = ifrc_white, face = "bold", size = rel(0.85)),
+      strip.background = element_rect(fill = ifrc_gray_dark, colour = NA),
+      plot.background  = element_rect(fill = ifrc_white, colour = NA),
+      panel.background = element_rect(fill = ifrc_white, colour = NA)
+    )
+}
+
+# ---- Load data ----------------------------------------------------------
+events <- read_csv("data/3_Emergency_Events_Data_all_.csv", show_col_types = FALSE) %>%
+  mutate(disaster_start_date = as_date(disaster_start_date),
+         year  = year(disaster_start_date),
+         dtype.name = ifelse(is.na(dtype.name), "Unspecified", dtype.name))
+
+appeals <- read_csv("data/5_Appeals.csv", show_col_types = FALSE) %>%
+  mutate(start_date = as_date(start_date),
+         year = year(start_date))
+
+# ---- Countries reference file -------------------------------------------
+# Official IFRC GO region coding, confirmed against appeals$region.id /
+# appeals$region.region_name: 0 Africa, 1 Americas, 2 Asia Pacific,
+# 3 Europe, 4 Middle East & North Africa.
+region_lookup <- c(`0` = "Africa", `1` = "Americas", `2` = "Asia Pacific",
+                    `3` = "Europe", `4` = "Middle East & North Africa")
+
+countries_raw <- read_csv("data/4_Countries.csv", show_col_types = FALSE)
+
+countries_ref <- countries_raw %>%
+  filter(record_type_display == "Country") %>%
+  transmute(country_id  = id,
+            country_name = name,
+            iso3,
+            region_name = unname(region_lookup[as.character(region)]),
+            lon = `centroid.coordinates.0`,
+            lat = `centroid.coordinates.1`,
+            society_name,
+            inform_score)
+
+# id-based joins (far more robust than matching on free-text country names)
+events <- events %>%
+  mutate(countries.id = as.numeric(countries.id)) %>%
+  left_join(countries_ref, by = c("countries.id" = "country_id"))
+
+appeals <- appeals %>%
+  mutate(country.id = as.numeric(country.id))
+
+# ---- Data-quality diagnostics -------------------------------------------
+# Same checks as the original cleaning script (colSums(is.na()), duplicated()),
+# run here and displayed in Frame 1 rather than hidden, so the audit trail is
+# visible in the final storyboard.
+dq_table <- tibble(
+  Dataset  = c("Emergency Events", "Emergency Events", "Emergency Events",
+               "Appeals", "Appeals", "Appeals",
+               "Countries", "Countries"),
+  Field    = c("num_affected", "ifrc_severity_level_display", "region_name (post-join)",
+               "num_beneficiaries", "amount_funded", "iso3 (post-join, used in Frame 9)",
+               "inform_score", "region / centroid"),
+  `% missing` = c(
+    round(mean(is.na(events$num_affected)) * 100, 1),
+    round(mean(is.na(events$ifrc_severity_level_display)) * 100, 1),
+    round(mean(is.na(events$region_name)) * 100, 1),
+    round(mean(is.na(appeals$num_beneficiaries)) * 100, 1),
+    round(mean(is.na(appeals$amount_funded)) * 100, 1),
+    round(mean(is.na((appeals %>% left_join(countries_ref %>% select(country_id, iso3), by = c("country.id" = "country_id")))$iso3)) * 100, 1),
+    round(mean(is.na(countries_ref$inform_score)) * 100, 1),
+    round(mean(is.na(countries_raw$region)) * 100, 1)
+  ),
+  Note = c("too sparse to chart; Appeals' num_beneficiaries used instead (Frame 5)",
+           "complete; used directly as the severity proxy (Frame 8)",
+           "id-based join to Countries; ~0.5% of events have no matching country id",
+           "complete; used as the human-impact measure (Frame 5)",
+           "complete; used directly (Frame 6)",
+           "id-based join to Countries; ~0.1% of appeals have no matching iso3",
+           "field exists in the schema but is empty in this extract (Frame 9)",
+           "mostly empty on non-country rows (clusters/regions), filtered out before use")
+)
+
+dup_events  <- sum(duplicated(events))
+dup_appeals <- sum(duplicated(appeals))
+```
+
+```{=html}
+<style>
+
+
+/* ---- One header only: the navbar stays visible (it now carries the 4
+   external IFRC links) but its own title/brand text is hidden, so the
+   big red banner below remains the single visible page header --------- */
+.navbar-header,
+.navbar-brand {
+  display: none !important;
+}
+.navbar-inverse .navbar-nav > li > a {
+  color: #FFFFFF !important;
+}
+
+/* ---- Title banner ---------------------------------------------------- */
+.ifrc-title-banner {
+  text-align: center;
+  padding: 18px 10px 10px 10px;
+  background-color: #FFFFFF;
+}
+.ifrc-main-title {
+  color: #ED1B2E;
+  font-weight: 700;
+  font-size: 3.5rem;
+  font-family: 'Lato', 'Helvetica Neue', Arial, sans-serif;
+  margin: 0 0 4px 0;
+  line-height: 1.2;
+}
+.ifrc-subtitle {
+  color: #6D6E71;
+  font-style: italic;
+  font-size: 1.5rem;
+  font-family: 'Lato', 'Helvetica Neue', Arial, sans-serif;
+  margin: 0 0 10px 0;
+}
+
+/* ---- Storyboard tabs (frame filmstrip) -------------------------------- */
+.storyboard-nav .sbnext,
+.storyboard-nav .sbprev {
+  display: none !important;
+}
+.storyboard-nav .sbframelist {
+  background: #FFFFFF;
+  border-bottom: 1px solid #D9D9DB;
+  height: auto !important;
+  width: 100%;
+  padding: 4px 0;
+  display: flex;
+  overflow: visible;
+  white-space: normal;
+}
+.storyboard-nav .sbframelist ul {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  justify-content: space-between;
+  width: 100% !important;
+  gap: 4px;
+  margin: 0;
+  padding: 0 8px;
+}
+.storyboard-nav .sbframelist ul li {
+  box-sizing: border-box;
+  background-color: #FFFFFF !important;
+  border: 1px solid #6D6E71 !important;
+  color: #ED1B2E !important;
+  font-weight: 600;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 62px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 6px;
+  font-size: 0.65 rem;
+  line-height: 1.15;
+  border-radius: 8px;
+  margin: 0;
+  text-align: center;
+  white-space: normal;
+  word-wrap: break-word;
+  overflow: visible;
+  text-overflow: unset;
+  transition: all 0.15s ease;
+}
+.storyboard-nav .sbframelist ul li:hover {
+  border-color: #ED1B2E !important;
+  background-color: #FDF4F4 !important;
+}
+.storyboard-nav .sbframelist ul li a {
+  white-space: normal !important;
+  word-wrap: break-word !important;
+  overflow: visible !important;
+  text-overflow: unset !important;
+  display: block;
+  width: 100%;
+}
+.storyboard-nav .sbframelist ul li.active {
+  background-color: #D9D9DB !important;
+  border: 2px solid #ED1B2E !important;
+  color: #ED1B2E !important;
+}
+}
+
+/* ---- Frame 1 ONLY: new centered layout (text centered, chart full-width below) ---- */
+.ifrc-frame1-narrative {
+  padding: 4px 10px 14px 10px;
+  text-align: center;
+  line-height: 1.75;
+  max-width: 900px;
+  margin: 0 auto;
+}
+.ifrc-frame1-chart {
+  width: 100%;
+  padding: 0 10px;
+}
+
+
+/* ---- Frame 1 custom two-row / two-column layout (kept for reuse elsewhere) ---- */
+.ifrc-intro-narrative {
+  padding: 4px 10px 14px 10px;
+}
+.ifrc-two-col {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  align-items: stretch;
+  padding: 0 10px;
+}
+.ifrc-col-left, .ifrc-col-right {
+  flex: 1 1 46%;
+  min-width: 280px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---- Frame 5 row-orientation layout (chart row + value-box row) ------- */
+.ifrc-three-col {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 6px 10px 0 10px;
+}
+.ifrc-three-col > div { flex: 1 1 30%; min-width: 220px; }
+
+/* ---- Data-quality diagnostics table (Frame 1) -------------------------- */
+.ifrc-dq-wrap {
+  padding: 6px 10px 16px 10px;
+  font-size: 0.78rem;
+}
+.ifrc-dq-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.ifrc-dq-wrap th {
+  background-color: #ED1B2E;
+  color: #FFFFFF;
+  padding: 5px 8px;
+  text-align: left;
+  font-size: 0.75rem;
+}
+.ifrc-dq-wrap td {
+  padding: 4px 8px;
+  border-bottom: 1px solid #D9D9DB;
+  color: #3A3A3C;
+}
+
+/* ---- Custom tabset (Frame 6) ------------------------------------------- */
+.ifrc-tabset .nav-tabs > li.active > a {
+  color: #ED1B2E !important;
+  font-weight: 700;
+  border-color: #6D6E71 #6D6E71 #FFFFFF !important;
+}
+.ifrc-tabset .nav-tabs > li > a {
+  color: #6D6E71;
+}
+.ifrc-tabset .nav-tabs > li > a:hover {
+  color: #ED1B2E;
+}
+
+/* ---- Footer -------------------------------------------------------------*/
+.ifrc-footer {
+  text-align: center;
+  color: #6D6E71;
+  font-size: 0.7rem;
+  padding: 10px 10px 4px 10px;
+  border-top: 1px solid #D9D9DB;
+  margin-top: 10px;
+}
+</style>
+````
+
+
+```{=html}
+<div class="ifrc-title-banner">
+  <div class="ifrc-main-title">Humanitarian Horizons: Visual Storytelling with IFRC Data</div>
+  <div class="ifrc-subtitle">Mhamad Shhab Aldeen Hasan (P166175) | MSc Data Science &amp; Analytics, UKM | STQD6124 Data Visualization — July 2026</div>
+</div>
+```
+
+### Why Disaster Data Matters
+
+```{=html}
+<div class="ifrc-frame1-narrative">
+<p><strong>Every disaster begins as a data point before it becomes a headline.</strong></p>
+<p>The International Federation of Red Cross and Red Crescent Societies (IFRC) is the world's largest humanitarian network, coordinating 191 National Societies that respond to floods, epidemics, storms, and displacement crises every single day. Behind every ambulance dispatched and every shelter kit distributed sits a record in a database — a timestamp, a country, a disaster type, a funding line. This storyboard tells that story through three of IFRC's own operational datasets from the <strong>IFRC GO Platform</strong>: <strong>Emergency Events</strong> (field-reported disasters), <strong>Appeals</strong> (the funding instruments IFRC uses to mobilise resources), and <strong>Countries</strong> (a reference file of National Society profiles, official IFRC regions, and geo-coordinates). Together they cover `r nrow(events) + nrow(appeals)` operational records across `r nrow(countries_ref)` country profiles and `r min(appeals$year, na.rm=TRUE)`&ndash;2026. Records are linked using the platform's own numeric IDs rather than free-text country names, and every chart in this storyboard is built exclusively from these real, unedited operational records &mdash; nothing is simulated.</p>
+</div>
+```
+
+::: {.ifrc-frame1-chart}
+```{r frame1-chart, fig.width=7, fig.height=4}
+scope_df <- tibble(
+  metric = c("Emergency events\nlogged", "IFRC appeals\nlaunched", "Country profiles\n(reference file)",
+             "Disaster types\ntracked", "Years of\noperational data"),
+  value  = c(nrow(events), nrow(appeals), nrow(countries_ref),
+             length(union(unique(events$dtype.name), unique(appeals$dtype.name))),
+             as.integer(max(appeals$year, na.rm = TRUE) - min(appeals$year, na.rm = TRUE) + 1))
+) %>%
+  mutate(metric = fct_reorder(metric, value))
+ggplot(scope_df, aes(x = metric, y = value)) +
+  geom_col(fill = ifrc_red, width = 0.65) +
+  geom_text(aes(label = comma(value)), hjust = -0.15, colour = ifrc_gray_dark, fontface = "bold", size = 4.5) +
+  coord_flip(clip = "off") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.28))) +
+  labs(title = "The scope of this documentary, in one picture",
+       subtitle = "Scale of the three IFRC GO-platform datasets used across this storyboard",
+       x = NULL, y = NULL,
+       caption = "Source: IFRC GO Platform — Emergency Events (n = 1,000), Appeals (n = 1,000) and Countries (n = 253) extracts, 2026.") +
+  theme_ifrc() +
+  theme(panel.grid.major.y = element_blank(), axis.text.x = element_blank())
+```
+:::
+
+
+### Number of Emergencies Rising?
+
+```{r frame2-chart}
+appeals_yearly <- appeals %>%
+  filter(!is.na(year), year <= 2026) %>%
+  count(year, name = "n_appeals")
+
+events_yearly <- events %>%
+  filter(!is.na(year)) %>%
+  count(year, name = "n_events")
+
+ggplot(appeals_yearly, aes(x = year, y = n_appeals)) +
+  geom_area(fill = ifrc_red, alpha = 0.12) +
+  geom_line(colour = ifrc_red, linewidth = 1.3) +
+  geom_point(colour = ifrc_red, size = 2.6) +
+  geom_text(aes(label = n_appeals), vjust = -1.1, colour = ifrc_gray_dark, size = 3.6, fontface = "bold") +
+  annotate("text", x = 2026, y = max(appeals_yearly$n_appeals) * 0.35,
+           label = "2026 is\npartial\n(to Apr)", colour = ifrc_gray, size = 3.1, hjust = 1, fontface = "italic") +
+  scale_x_continuous(breaks = appeals_yearly$year) +
+  scale_y_continuous(limits = c(0, max(appeals_yearly$n_appeals) * 1.2)) +
+  labs(title = "IFRC appeals launched per year, 2019–2026",
+       subtitle = "Number of new emergency appeals opened, by calendar year",
+       x = NULL, y = "Appeals launched",
+       caption = "Source: IFRC GO Platform, Appeals extract (n = 1,000). 2026 figure covers Jan–Apr only.") +
+  theme_ifrc()
+```
+
+***
+
+**The trend line is not flat — and it is not gentle.**
+
+New IFRC appeals climbed from `r appeals_yearly$n_appeals[appeals_yearly$year==2019]` in 2019 to a peak of `r max(appeals_yearly$n_appeals)` in `r appeals_yearly$year[which.max(appeals_yearly$n_appeals)]`, a rise of roughly `r round((max(appeals_yearly$n_appeals)/appeals_yearly$n_appeals[appeals_yearly$year==2019]-1)*100)`% over six years. This mirrors what climate and conflict researchers have documented globally: more frequent hydro-meteorological shocks, protracted epidemics, and displacement crises are pushing humanitarian systems to open new operations at a faster pace than a decade ago.
+
+*Methodological note:* the Appeals extract was used for this trend (rather than the Emergency Events extract) because it spans a full **`r max(appeals$year, na.rm=TRUE) - min(appeals$year, na.rm=TRUE) + 1`-year window (2019–2026)**, whereas the Emergency Events extract only covers `r min(events$year, na.rm=TRUE)`–2026 — a four-year rolling operational log. A multi-year trend line requires the longer series to avoid mistaking a short observation window for a long-term pattern.
+
+---
+
+### Where Is the Burden Heaviest?
+
+```{r frame3-chart}
+top_types_region <- events %>%
+  filter(!is.na(region_name)) %>%
+  mutate(dtype_grp = fct_lump_n(dtype.name, n = 5, other_level = "Other")) %>%
+  count(region_name, dtype_grp)
+
+ggplot(top_types_region, aes(x = dtype_grp, y = region_name, fill = n)) +
+  geom_tile(colour = "white", linewidth = 1) +
+  geom_text(aes(label = n), colour = ifrc_gray_dark, fontface = "bold", size = 3.8) +
+  scale_fill_gradient(low = "#FDF4F4", high = ifrc_red) +
+  guides(fill = "none") +
+  labs(title = "Emergency events by IFRC region and disaster type",
+       subtitle = "Logged events joined to their official IFRC region via the Countries reference file (id-based join)",
+       x = NULL, y = NULL,
+       caption = "Sources: IFRC GO Platform Emergency Events extract + Countries extract, joined on countries.id = id.") +
+  theme_ifrc() +
+  theme(panel.grid = element_blank(), axis.text.x = element_text(angle = 20, hjust = 1))
+```
+
+***
+
+**Vulnerability is not evenly distributed across the globe.**
+
+Joining each emergency event to its official IFRC region — via the Countries reference file's own `id` field, not a text match — shows Africa carrying the largest share of logged events (`r top_types_region %>% filter(region_name=="Africa") %>% summarise(s=sum(n)) %>% pull(s)` of `r sum(top_types_region$n)`, or `r round(sum(top_types_region$n[top_types_region$region_name=="Africa"])/sum(top_types_region$n)*100,1)`%), driven overwhelmingly by floods and epidemics — a signature of the continent's exposure to both climate-driven hazards and stretched disease-surveillance infrastructure. The Americas rank a close second in raw event counts, ahead of Asia Pacific, which is a useful contrast with the Appeals data used later in this storyboard (Frame 6): not every logged event escalates into a funded international appeal, so the region that reports the *most events* is not always the region that draws the *most funding requests*.
+
+This regional skew matters operationally: it is the basis on which IFRC allocates its **Disaster Response Emergency Fund (DREF)** and prioritises pre-positioned stock, rather than treating every National Society as facing an equal baseline risk.
+
+---
+
+### What Keeps Recurring?
+
+```{r frame4-chart}
+top5_types <- events %>%
+  filter(dtype.name != "Other") %>%
+  count(dtype.name, sort = TRUE) %>%
+  slice_max(n, n = 5) %>%
+  mutate(dtype.name = fct_reorder(dtype.name, n))
+
+ggplot(top5_types, aes(x = dtype.name, y = n)) +
+  geom_segment(aes(xend = dtype.name, y = 0, yend = n), colour = ifrc_gray_light, linewidth = 1.2) +
+  geom_point(colour = ifrc_red, size = 6) +
+  geom_text(aes(label = n), colour = "white", fontface = "bold", size = 3) +
+  coord_flip(clip = "off") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "The five disaster types that dominate IFRC's caseload",
+       subtitle = "Ranked by number of logged emergency events (catch-all 'Other' category excluded)",
+       x = NULL, y = "Number of events",
+       caption = "Source: IFRC GO Platform, Emergency Events extract (n = 1,000), field: dtype.name.") +
+  theme_ifrc() +
+  theme(panel.grid.major.y = element_blank())
+```
+
+***
+
+**Five hazard types explain most of what National Societies respond to.**
+
+**`r top5_types$dtype.name[nrow(top5_types)]`** alone accounts for `r top5_types$n[nrow(top5_types)]` of the `r nrow(events)` logged events (`r round(top5_types$n[nrow(top5_types)]/nrow(events)*100)`%) — unsurprising given that floods are geographically ubiquitous, recur seasonally, and are increasingly intensified by shifting rainfall patterns. **Epidemics** and **fires** follow, reflecting the dual burden of disease outbreaks in under-resourced health systems and the growing frequency of both urban and wildland fire incidents. **Cyclones** and **population movement** round out the top five, the latter a reminder that IFRC's mandate extends beyond natural hazards into conflict- and climate-driven displacement.
+
+The catch-all **"Other"** category (`r events %>% filter(dtype.name=="Other") %>% nrow()` events) was deliberately excluded from the ranking above because it aggregates heterogeneous, non-comparable events and would distort a "top disaster type" comparison rather than inform it.
+
+---
+
+### Who Gets Reached?
+
+```{r frame5-data, include=FALSE}
+# storyboard_chunk_options pattern: data prep hidden (include=FALSE), the
+# chart and value-box chunks that follow are the only visible output.
+impact_df <- appeals %>%
+  filter(!is.na(region.region_name)) %>%
+  mutate(dtype_grp = fct_lump_n(dtype.name, n = 6, other_level = "Other", w = num_beneficiaries)) %>%
+  group_by(dtype_grp, region.region_name) %>%
+  summarise(beneficiaries = sum(num_beneficiaries, na.rm = TRUE), .groups = "drop")
+
+total_beneficiaries <- sum(appeals$num_beneficiaries, na.rm = TRUE)
+
+top_dtype_impact <- impact_df %>%
+  group_by(dtype_grp) %>%
+  summarise(s = sum(beneficiaries), .groups = "drop") %>%
+  slice_max(s, n = 1)
+
+top_region_impact <- impact_df %>%
+  group_by(region.region_name) %>%
+  summarise(s = sum(beneficiaries), .groups = "drop") %>%
+  slice_max(s, n = 1)
+```
+
+```{r frame5-chart}
+ggplot(impact_df, aes(x = fct_reorder(dtype_grp, beneficiaries, .fun = sum), y = beneficiaries, fill = region.region_name)) +
+  geom_col(width = 0.7) +
+  coord_flip() +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) +
+  scale_fill_manual(values = ifrc_palette, name = "Region") +
+  labs(title = "People targeted for assistance, by disaster type and region",
+       subtitle = "Cumulative planned beneficiaries across all appeals, 2019–2026",
+       x = NULL, y = "Planned beneficiaries (people)",
+       caption = "Source: IFRC GO Platform, Appeals extract, field: num_beneficiaries (0% missing, n = 1,000).") +
+  theme_ifrc()
+```
+
+```{=html}
+<div class="ifrc-three-col">
+  <div class="ifrc-value-card" style="background-color:#ED1B2E;">
+    <span class="fa fa-users"></span>
+    <span class="ifrc-value-number">`r comma(total_beneficiaries)`</span>
+    <span class="ifrc-value-caption">Total planned beneficiaries, all appeals</span>
+  </div>
+  <div class="ifrc-value-card" style="background-color:#6D6E71;">
+    <span class="fa fa-exclamation-triangle"></span>
+    <span class="ifrc-value-number">`r as.character(top_dtype_impact$dtype_grp)`</span>
+    <span class="ifrc-value-caption">Disaster type with highest cumulative impact</span>
+  </div>
+  <div class="ifrc-value-card" style="background-color:#A81120;">
+    <span class="fa fa-globe"></span>
+    <span class="ifrc-value-number">`r as.character(top_region_impact$region.region_name)`</span>
+    <span class="ifrc-value-caption">Region with highest cumulative impact</span>
+  </div>
+</div>
+```
+
+***
+
+**Human impact, not event count, is the real measure of humanitarian need.**
+
+This chart uses the Appeals dataset's **`num_beneficiaries`** field — the number of people an operation plans to reach — rather than the Emergency Events dataset's `num_affected` field. That choice is deliberate: `num_affected` is populated for only **`r sum(!is.na(events$num_affected))` of `r nrow(events)` events (`r round(mean(!is.na(events$num_affected))*100,1)`%)**, too sparse to summarise reliably by disaster type, whereas `num_beneficiaries` is complete across all 1,000 appeals and reflects the same underlying reality — how many people a hazard has put in need of assistance.
+
+**Population movement** and **epidemic** operations dominate cumulative beneficiary counts, a reminder that the disasters that occur *most often* (floods, fires) are not always the ones that put the *most people* at risk at once — slow-building health and displacement crises can quietly outstrip the human cost of more frequent but geographically contained hazards.
+
+---
+
+### Are Appeals Fully Funded?
+
+```{r frame6-data, include=FALSE}
+funding_yearly <- appeals %>%
+  filter(!is.na(year), year <= 2026) %>%
+  group_by(year) %>%
+  summarise(requested = sum(amount_requested, na.rm = TRUE),
+            funded    = sum(amount_funded, na.rm = TRUE), .groups = "drop") %>%
+  pivot_longer(c(requested, funded), names_to = "type", values_to = "amount") %>%
+  mutate(type = recode(type, requested = "Requested", funded = "Funded"),
+         type = fct_relevel(type, "Requested", "Funded"))
+
+funding_by_region <- appeals %>%
+  filter(!is.na(region.region_name)) %>%
+  group_by(region.region_name) %>%
+  summarise(requested = sum(amount_requested, na.rm = TRUE),
+            funded    = sum(amount_funded, na.rm = TRUE), .groups = "drop") %>%
+  mutate(pct_funded = funded / requested * 100)
+```
+
+```{=html}
+<div class="ifrc-tabset">
+<ul class="nav nav-tabs" role="tablist">
+  <li role="presentation" class="active"><a href="#f6tab1" role="tab" data-toggle="tab">Trend over time</a></li>
+  <li role="presentation"><a href="#f6tab2" role="tab" data-toggle="tab">By region</a></li>
+</ul>
+<div class="tab-content">
+<div role="tabpanel" class="tab-pane active" id="f6tab1">
+```
+
+```{r frame6-chart-trend, out.width="100%", fig.width=9, fig.height=5}
+ggplot(funding_yearly, aes(x = year, y = amount, fill = type)) +
+  geom_area(data = filter(funding_yearly, type == "Requested"), alpha = 0.18, fill = ifrc_gray) +
+  geom_line(aes(colour = type, linetype = type), linewidth = 1.2) +
+  geom_point(aes(colour = type), size = 2.4) +
+  scale_colour_manual(values = c("Requested" = ifrc_gray, "Funded" = ifrc_red), name = NULL) +
+  scale_linetype_manual(values = c("Requested" = "dashed", "Funded" = "solid"), name = NULL) +
+  scale_y_continuous(labels = label_dollar(scale_cut = cut_short_scale())) +
+  scale_x_continuous(breaks = funding_yearly$year) +
+  guides(fill = "none") +
+  labs(title = "Funding requested vs. funding received, 2019–2026",
+       subtitle = "Aggregate appeal budgets across all IFRC operations, in USD",
+       x = NULL, y = "Amount (US$)",
+       caption = "Source: IFRC GO Platform, Appeals extract, fields: amount_requested, amount_funded.") +
+  theme_ifrc()
+```
+
+```{=html}
+</div>
+<div role="tabpanel" class="tab-pane" id="f6tab2">
+```
+
+```{r frame6-chart-region, out.width="100%", fig.width=10, fig.height=5}
+ggplot(funding_by_region, aes(x = fct_reorder(region.region_name, pct_funded), y = pct_funded)) +
+  geom_col(fill = ifrc_red, width = 0.65) +
+  geom_text(aes(label = paste0(round(pct_funded), "%")), hjust = -0.15, colour = ifrc_gray_dark, fontface = "bold") +
+  geom_hline(yintercept = 100, linetype = "dashed", colour = ifrc_gray) +
+  coord_flip(clip = "off") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Share of requested funding actually received, by region",
+       subtitle = "Dashed line marks 100% (fully funded)",
+       x = NULL, y = "% of requested amount funded",
+       caption = "Source: IFRC GO Platform, Appeals extract, fields: amount_requested, amount_funded, region.region_name.") +
+  theme_ifrc() +
+  theme(axis.text.x = element_blank())
+```
+
+```{=html}
+</div>
+</div>
+</div>
+```
+
+***
+
+**The gap between what is asked for and what arrives is the clearest signal of donor fatigue.**
+
+Across the full dataset, IFRC appeals requested **US`r label_dollar(scale_cut=cut_short_scale())(sum(appeals$amount_requested, na.rm=TRUE))`** and received **US`r label_dollar(scale_cut=cut_short_scale())(sum(appeals$amount_funded, na.rm=TRUE))`** — a funding ratio of only **`r round(sum(appeals$amount_funded, na.rm=TRUE)/sum(appeals$amount_requested, na.rm=TRUE)*100,1)`%**. In other words, for every dollar of identified humanitarian need, IFRC operations in this dataset received under fifty cents.
+
+The **By region** tab breaks that headline number apart: funding shortfalls are not uniform — some regions consistently clear a higher share of their ask than others, which is a starting point for asking *why* (media visibility, donor relationships, protracted vs. sudden-onset crises) rather than treating the 46% figure as one flat global story.
+
+This shortfall is not a rounding error — it translates directly into rationed relief items, shortened cash-assistance cycles, and delayed early-recovery programming. It is also the empirical justification for mechanisms like the DREF, which exist precisely because appeal-based, donor-dependent funding is structurally slow and incomplete relative to need.
+
+---
+
+### A Closer Look: Bangladesh
+
+```{r frame7-chart}
+bd_events <- events %>%
+  filter(countries.name == "Bangladesh") %>%
+  arrange(disaster_start_date)
+
+ggplot(bd_events, aes(x = disaster_start_date, y = fct_reorder(dtype.name, disaster_start_date),
+                       colour = ifrc_severity_level_display)) +
+  geom_segment(aes(xend = disaster_start_date, y = dtype.name, yend = dtype.name), colour = ifrc_gray_light) +
+  geom_point(size = 4) +
+  scale_colour_manual(values = c("Yellow" = "#F4C430", "Orange" = "#F2994A", "Red" = ifrc_red),
+                     name = "IFRC severity", na.value = ifrc_gray) +
+  scale_x_date(date_labels = "%b %Y") +
+  labs(title = "Bangladesh: disaster timeline, 2023–2026",
+       subtitle = paste0(nrow(bd_events), " emergency events logged, coloured by IFRC's own severity classification"),
+       x = NULL, y = NULL,
+       caption = "Source: IFRC GO Platform, Emergency Events extract, filtered to countries.name == 'Bangladesh'.") +
+  theme_ifrc()
+```
+
+***
+
+**Bangladesh shows, in miniature, why disaster response cannot be a single-hazard playbook.**
+
+In this dataset alone, Bangladesh recorded **`r nrow(bd_events)` distinct emergency events** spanning cyclones, monsoon and flash flooding, cold waves, heat waves, epidemics, and fire — often within the same calendar year. The Countries reference file identifies the responding National Society as the **`r countries_ref %>% filter(country_name=="Bangladesh") %>% pull(society_name)`**, one of the world's most tested Red Crescent branches. It layers hazard-specific systems on top of this reality: cyclone early-warning volunteers along the coast, flood-response pre-positioning in char (river-island) communities, and heat-action plans for Dhaka's urban poor.
+
+Separately, the Appeals dataset shows **`r appeals %>% filter(country.name=="Bangladesh") %>% nrow()` IFRC appeals** for Bangladesh over 2019–2026, together targeting over **`r comma(appeals %>% filter(country.name=="Bangladesh") %>% summarise(s=sum(num_beneficiaries,na.rm=TRUE)) %>% pull(s))` beneficiaries** — evidence that Bangladesh's disaster exposure is not an occasional shock but a continuous, multi-hazard operating environment.
+
+---
+
+### How Severe Are Different Hazards?
+
+```{r frame8-chart, fig.height=5.6}
+sev_by_type <- events %>%
+  filter(dtype.name %in% top5_types$dtype.name, !is.na(ifrc_severity_level_display)) %>%
+  mutate(high_severity = ifrc_severity_level_display %in% c("Orange", "Red")) %>%
+  group_by(dtype.name) %>%
+  summarise(pct_high = mean(high_severity) * 100, .groups = "drop") %>%
+  arrange(dtype.name)
+
+# build a simple radar/spider chart with base graphics + polygon geometry
+radar_vals   <- sev_by_type$pct_high
+radar_labels <- sev_by_type$dtype.name
+n_axes <- length(radar_vals)
+angles <- seq(0, 2 * pi, length.out = n_axes + 1)[- (n_axes + 1)]
+max_val <- max(20, ceiling(max(radar_vals) / 5) * 5)
+
+to_xy <- function(r, ang) data.frame(x = r * sin(ang), y = r * cos(ang))
+
+grid_df <- bind_rows(lapply(seq(max_val / 4, max_val, length.out = 4), function(r) {
+  pts <- to_xy(r, c(angles, angles[1]))
+  pts$ring <- r
+  pts
+}))
+
+axis_df <- bind_rows(lapply(angles, function(a) rbind(to_xy(0, a), to_xy(max_val, a))))
+axis_df$grp <- rep(seq_along(angles), each = 2)
+
+poly_df <- to_xy(c(radar_vals, radar_vals[1]), c(angles, angles[1]))
+label_df <- to_xy(max_val * 1.18, angles)
+label_df$label <- radar_labels
+
+ggplot() +
+  geom_path(data = grid_df, aes(x = x, y = y, group = ring), colour = ifrc_gray_light, linewidth = 0.3) +
+  geom_path(data = axis_df, aes(x = x, y = y, group = grp), colour = ifrc_gray_light, linewidth = 0.3) +
+  geom_polygon(data = poly_df, aes(x = x, y = y), fill = ifrc_red, alpha = 0.28, colour = ifrc_red, linewidth = 1.1) +
+  geom_point(data = poly_df, aes(x = x, y = y), colour = ifrc_red, size = 2.6) +
+  geom_text(data = label_df, aes(x = x, y = y, label = paste0(label, "\n", round(radar_vals[match(label, radar_labels)],0), "%")),
+            colour = ifrc_gray_dark, size = 3.5, fontface = "bold", lineheight = 0.9) +
+  coord_fixed(clip = "off") +
+  labs(title = "Share of events classified Orange/Red severity, by disaster type",
+       subtitle = "IFRC's own operational severity flag used as a proxy for hazard seriousness",
+       caption = "Source: IFRC GO Platform, Emergency Events extract, field: ifrc_severity_level_display.") +
+  theme_void() +
+  theme(plot.title = element_text(face = "bold", colour = ifrc_gray_dark, hjust = 0.5, size = rel(1.15)),
+        plot.subtitle = element_text(colour = ifrc_gray, hjust = 0.5, size = rel(0.85), margin = margin(b=10)),
+        plot.caption = element_text(colour = ifrc_gray, size = rel(0.65), hjust = 0.5),
+        plot.background = element_rect(fill = ifrc_white, colour = NA))
+```
+
+***
+
+**Neither dataset records deaths — so severity has to be read through IFRC's own operational lens.**
+
+Despite the frame title, no mortality or case-fatality field exists in either the Emergency Events or Appeals extract, so a literal "mortality rate" chart is not something these data can honestly produce. Instead, this radar chart uses IFRC's own **`ifrc_severity_level`** flag (Yellow / Orange / Red) — the classification IFRC's surge teams assign to gauge how serious a response needs to be — and plots the **share of events rated Orange or Red** for each of the five leading disaster types.
+
+**`r sev_by_type$dtype.name[which.max(sev_by_type$pct_high)]`** stands out with the highest share of high-severity classifications (`r round(max(sev_by_type$pct_high))`%), consistent with its capacity to affect large populations suddenly and simultaneously. Slower-onset hazards tend to cluster at lower severity shares in IFRC's own classification, not because they are less damaging cumulatively, but because each individual event is, on average, rated less acute at the point of reporting.
+
+---
+
+### Where Does Risk Concentrate? {data-commentary-width=280}
+
+```{r frame9-data, include=FALSE}
+appeal_counts_iso <- appeals %>%
+  left_join(countries_ref %>% select(country_id, iso3), by = c("country.id" = "country_id")) %>%
+  filter(!is.na(iso3)) %>%
+  group_by(iso3) %>%
+  summarise(
+    country_name = first(country.name),
+    region_name = first(region.region_name),
+    n_appeals = n(),
+    total_requested = sum(amount_requested, na.rm = TRUE),
+    total_funded = sum(amount_funded, na.rm = TRUE),
+    total_beneficiaries = sum(num_beneficiaries, na.rm = TRUE),
+    top_dtype = names(sort(table(dtype.name), decreasing = TRUE))[1],
+    .groups = "drop"
+  ) %>%
+  mutate(pct_funded = round(total_funded / total_requested * 100, 0))
+```
+
+```{r frame9-chart, fig.width=13, fig.height=5, out.width="100%"}
+geo_style <- list(
+  showframe = FALSE,
+  showcoastlines = TRUE,
+  coastlinecolor = toRGB(ifrc_gray_light),
+  landcolor = toRGB("#F7F7F7"),
+  projection = list(type = "natural earth"),
+  bgcolor = "rgba(0,0,0,0)"
+)
+plot_geo(appeal_counts_iso) %>%
+  add_trace(
+    locations = ~iso3, locationmode = "ISO-3", z = ~n_appeals,
+    text = ~paste0(
+      "<b>", country_name, "</b> (", region_name, ")",
+      "<br>Appeals: ", n_appeals,
+      "<br>Top disaster type: ", top_dtype,
+      "<br>Beneficiaries reached: ", scales::comma(total_beneficiaries),
+      "<br>Funding: ", scales::dollar(total_funded, scale_cut = scales::cut_short_scale()),
+      " of ", scales::dollar(total_requested, scale_cut = scales::cut_short_scale()),
+      " (", pct_funded, "% funded)"
+    ),
+    hoverinfo = "text",
+    colors = c(ifrc_gray_light, ifrc_red),
+    marker = list(line = list(color = toRGB(ifrc_white), width = 0.4)),
+    showscale = FALSE
+  ) %>%
+  layout(
+    title = list(text = "Where IFRC has launched the most appeals, 2019–2026",
+                 font = list(color = ifrc_gray_dark, family = "sans-serif", size = 16),
+                 y = 0.95),
+    geo = geo_style,
+    paper_bgcolor = "rgba(0,0,0,0)",
+    margin = list(t = 30, b = 0, l = 0, r = 0),
+    autosize = TRUE
+  ) %>%
+  config(displayModeBar = FALSE, responsive = TRUE)
+```
+
+***
+**Preparedness starts with knowing where the next appeal is most likely to come from.**
+
+The Countries file includes an **`inform_score`** column meant to carry the INFORM Risk Index, but it is **empty for all `r nrow(countries_ref)` country profiles (0% populated)** — a verified data-quality finding, not an assumption. A literal INFORM choropleth cannot be built from this data.
+
+As a transparent substitute, this **interactive map** plots **IFRC appeal counts per country (2019–2026)** — hover any country for its figure. It uses ISO-3 country codes rather than name-matching, avoiding the exact join errors common in country-name-based maps.
+
+**Kenya, the Philippines, DR Congo, Ethiopia, Colombia, and Somalia** stand out with the most appeals — also consistently near the top of published INFORM rankings, lending validity to appeal frequency as a working proxy for where IFRC concentrates preparedness investment.
+
+---
+### What This Data Teaches Us
+
+```{r frame10-chart}
+summary_df <- tibble(
+  insight = c("Appeals rose approximately year-on-year",
+              "Africa carries the heaviest load",
+              "Floods are the most common disaster type",
+              "Funding gap of approximately 54%",
+              "Risk repeats in a small set of countries"),
+  weight = c(1,1,1,1,1)
+)
+
+ggplot(summary_df, aes(x = fct_inorder(insight), y = weight)) +
+  geom_col(fill = ifrc_red, width = 0.72) +
+  geom_text(aes(label = insight), y = 0.5, colour = ifrc_white, fontface = "bold", size = 4.2) +
+  coord_flip() +
+  labs(title = "Five findings from this storyboard",
+       x = NULL, y = NULL,
+       caption = "Synthesis of Frames 2–9, IFRC GO Platform Emergency Events & Appeals extracts.\nData sources: IFRC GO Platform \nEmergency Events Data (n = 1,000), Appeals (n = 1,000), Countries reference (n = 253 country profiles),\nAccessed 2026. https://go.ifrc.org") +
+  theme_ifrc() +
+  theme(axis.text = element_blank(), panel.grid = element_blank(), axis.title = element_blank(),
+        plot.margin = margin(t = 2, r = 10, b = 5, l = 10))
+```
+
+***
+
+**The numbers tell a consistent story: emergencies are growing more frequent, more concentrated, and more expensive than the humanitarian system can fully fund.**
+
+Across ten frames, this documentary showed appeal volumes climbing over a seven-year window; Africa and Asia Pacific absorbing the largest regional share of operations; floods, epidemics, fires, cyclones, and population movement dominating the hazard mix; a persistent funding gap of roughly half of stated need; and a small, recurring set of countries — Bangladesh among them — carrying a disproportionate, multi-hazard burden year after year.
+
+None of this diminishes IFRC's mission; if anything, it sharpens it. Data like this is precisely what allows the Federation and its 191 National Societies to move from reactive relief toward **anticipatory, evidence-led action** — pre-positioning stock before the flood peaks, training volunteers before the cyclone season starts, and directing scarce donor funding to where the recurrence data says it will be needed again. The central challenge ahead is not a shortage of data or of goodwill, but of financing: closing a funding gap that, on this evidence, still leaves roughly half of identified humanitarian need unmet.
+
+
+```{=html}
+<div class="ifrc-footer">
+  STQD6124 Data Visualization &middot; Universiti Kebangsaan Malaysia &middot; Mhamad Shhab Aldeen Hasan (P166175) &middot; July 2026
+</div>
+```
